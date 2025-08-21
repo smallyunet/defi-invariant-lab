@@ -1,27 +1,33 @@
-// contracts/lending/SimpleLending.sol
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+interface IERC20Metadata is IERC20 { function decimals() external view returns (uint8); }
+
 interface IOracle { function latest() external view returns (uint256 price, uint256 ts); }
 
 contract SimpleLending {
-    IERC20 public collateral; // collateral asset
-    IERC20 public debt;       // borrowed asset
+    IERC20 public collateral;
+    IERC20 public debt;
     IOracle public oracle;
+
+    uint8  public collDec;
+    uint8  public debtDec;
 
     uint256 public LTV_BPS = 7000;       // 70%
     uint256 public LIQ_THRESHOLD = 7500; // 75%
-    uint256 public RATE_APY_BPS = 500;   // simplified fixed APY 5%
+    uint256 public RATE_APY_BPS = 500;   // 5% APY
     uint256 public lastAccrual;
     uint256 public totalBorrows;
 
-    mapping(address => uint256) public coll; // amount (collateral token count)
-    mapping(address => uint256) public borrows; // borrowed asset amount
+    mapping(address => uint256) public coll;
+    mapping(address => uint256) public borrows;
 
     constructor(IERC20 _c, IERC20 _d, IOracle _o) {
         collateral = _c; debt = _d; oracle = _o; lastAccrual = block.timestamp;
+        collDec = IERC20Metadata(address(_c)).decimals();
+        debtDec = IERC20Metadata(address(_d)).decimals();
     }
 
     function deposit(uint256 amt) external {
@@ -32,7 +38,6 @@ contract SimpleLending {
     function _accrue() internal {
         uint256 dt = block.timestamp - lastAccrual;
         if (dt == 0 || totalBorrows == 0) { lastAccrual = block.timestamp; return; }
-        // simplified: linear interest accrual per second (approximation)
         uint256 interest = totalBorrows * RATE_APY_BPS * dt / (365 days) / 10_000;
         totalBorrows += interest;
         lastAccrual = block.timestamp;
@@ -67,9 +72,17 @@ contract SimpleLending {
         collateral.transfer(msg.sender, seize);
     }
 
+    // px = debt per 1 collateral (token-level), scaled by 1e8
     function _value(uint256 cAmt) internal view returns (uint256) {
-        (uint256 px,) = oracle.latest(); // assuming collateral & debt have same decimals, px is the price ratio of c->d
-        return cAmt * px / 1e8;
+        (uint256 px,) = oracle.latest(); // 1e8 scale, price of 1 collateral token in debt tokens
+        // cAmt * px/1e8 * 10^(debtDec - collDec)
+        if (debtDec >= collDec) {
+            uint256 scale = 10 ** (debtDec - collDec);
+            return cAmt * px * scale / 1e8;
+        } else {
+            uint256 scale = 10 ** (collDec - debtDec);
+            return cAmt * px / 1e8 / scale;
+        }
     }
 
     function health(address user) external view returns (uint256) { return _health(user); }
